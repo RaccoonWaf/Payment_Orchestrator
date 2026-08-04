@@ -10,12 +10,13 @@ class Settings(BaseSettings):
         env_file=BASE_DIR / ".env", extra="ignore"
         )
 
-    POSTGRES_USER: str
-    POSTGRES_PASSWORD: str
-    POSTGRES_DB: str
-    POSTGRES_HOST: str
-    POSTGRES_PORT: int
-    PROVIDER_URL: str
+    POSTGRES_USER: str = "payments"
+    POSTGRES_PASSWORD: str = "payments"
+    POSTGRES_DB: str = "payments"
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 5432
+
+    PROVIDER_URL: str = "http://localhost:8081"
 
     @property
     def database_url(self) -> str:
@@ -26,4 +27,4 @@ class Settings(BaseSettings):
         )
 
 
-settings = Settings.model_validate({})
+settings = Settings()
