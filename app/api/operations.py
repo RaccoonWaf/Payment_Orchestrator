@@ -1,16 +1,38 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.schemas.operation import CreateOperationRequest, OperationResponse
 from app.services.operation_service import (
     OperationConflictError,
+    OperationNotFoundError,
     create_operation,
     get_operation,
+    submit_operation,
     to_operation_response,
 )
 
 router = APIRouter(tags=["operations"])
+
+
+@router.post("/operations/{operation_id}/submit")
+async def post_submit(
+    operation_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        response, http_status = await submit_operation(session, operation_id)
+    except OperationNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        ) from e
+
+    return JSONResponse(
+        status_code=http_status,
+        content=response.model_dump(),
+    )
 
 
 @router.post(
