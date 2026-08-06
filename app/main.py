@@ -3,6 +3,7 @@ from fastapi import FastAPI
 
 from app.api.health import router as health_router
 from app.api.operations import router as operations_router
+from app.api.receipts import router as receipts_router
 
 
 @asynccontextmanager
@@ -19,3 +20,4 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(operations_router)
+app.include_router(receipts_router)
