@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import random
 
 import httpx
 
@@ -14,9 +16,19 @@ class ProviderError(Exception):
 
 
 class ProviderClient:
-    def __init__(self, base_url: str | None = None, timeout: float = 10.0):
+    def __init__(
+        self,
+        base_url: str | None = None,
+        timeout: float = 10.0,
+        max_attempts: int = 5,
+        base_delay: float = 0.5,
+        max_delay: float = 8.0,
+    ):
         self.base_url = (base_url or settings.PROVIDER_URL).rstrip("/")
         self.timeout = timeout
+        self.max_attempts = max_attempts
+        self.base_delay = base_delay
+        self.max_delay = max_delay
 
     async def create_payment(
         self,
@@ -25,7 +37,6 @@ class ProviderClient:
         amount: str,
         currency: str,
     ) -> str:
-
         url = f"{self.base_url}/payments"
         headers = {
             "Content-Type": "application/json",
@@ -38,29 +49,62 @@ class ProviderClient:
             "currency": currency,
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, json=payload, headers=headers)
-        except httpx.RequestError as e:
-            logger.warning(
-                "provider network error operation_id=%s error=%s",
-                operation_id,
-                e,
+        last_error: Exception | None = None
+
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.post(
+                        url,
+                        json=payload,
+                        headers=headers
+                        )
+            except httpx.RequestError as e:
+                last_error = ProviderError(str(e), retryable=True)
+                logger.warning(
+                    "provider network error operation_id=%s attempt=%s/%s error=%s",
+                    operation_id,
+                    attempt,
+                    self.max_attempts,
+                    e,
+                )
+            else:
+                if response.status_code == 503:
+                    last_error = ProviderError("provider unavailable", retryable=True)
+                    logger.warning(
+                        "provider 503 operation_id=%s attempt=%s/%s",
+                        operation_id,
+                        attempt,
+                        self.max_attempts,
+                    )
+                elif response.status_code not in (200, 202):
+                    raise ProviderError(
+                        f"provider returned {response.status_code}: {response.text}",
+                        retryable=False,
+                    )
+                else:
+                    data = response.json()
+                    provider_payment_id = data.get("providerPaymentId")
+                    if not provider_payment_id:
+                        raise ProviderError(
+                            "providerPaymentId missing in response"
+                            )
+                    logger.info(
+                        "provider accepted operation_id=%s attempt=%s providerPaymentId=%s",
+                        operation_id,
+                        attempt,
+                        provider_payment_id,
+                    )
+                    return provider_payment_id
+
+            if attempt >= self.max_attempts:
+                break
+
+            delay = min(self.base_delay * (2 ** (attempt - 1)), self.max_delay)
+            delay = delay * (0.5 + random.random())
+            await asyncio.sleep(delay)
+
+        raise last_error or ProviderError(
+            "provider call failed",
+            retryable=True
             )
-            raise ProviderError(str(e), retryable=True) from e
-
-        if response.status_code == 503:
-            raise ProviderError("provider unavailable", retryable=True)
-
-        if response.status_code not in (200, 202):
-            raise ProviderError(
-                f"provider returned {response.status_code}: {response.text}",
-                retryable=False,
-            )
-
-        data = response.json()
-        provider_payment_id = data.get("providerPaymentId")
-        if not provider_payment_id:
-            raise ProviderError("providerPaymentId missing in response")
-
-        return provider_payment_id
