@@ -5,6 +5,7 @@ from fastapi import status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import AsyncSessionLocal
 from app.common.enums import OperationStatus
 from app.models.event import Event
 from app.models.operation import Operation
@@ -14,6 +15,26 @@ from app.schemas.operation import CreateOperationRequest, OperationResponse
 
 
 logger = logging.getLogger(__name__)
+
+
+async def recover_pending_operations() -> None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Operation).where(Operation.status == OperationStatus.PROCESSING)
+        )
+        operations = result.scalars().all()
+
+    logger.info("recovery: found %s PROCESSING operations", len(operations))
+
+    for operation in operations:
+        try:
+            async with AsyncSessionLocal() as session:
+                await send_to_provider(session, operation.operation_id)
+        except Exception:
+            logger.exception(
+                "recovery failed operation_id=%s",
+                operation.operation_id,
+            )
 
 
 class OperationConflictError(Exception):
@@ -37,6 +58,8 @@ async def send_to_provider(session: AsyncSession, operation_id: str) -> None:
     if operation.status in (OperationStatus.COMPLETED, OperationStatus.REJECTED):
         return
     if operation.status != OperationStatus.PROCESSING:
+        return
+    if operation.provider_payment_id is not None:
         return
 
     client = ProviderClient()
