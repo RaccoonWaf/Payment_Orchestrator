@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import logging
 
 from fastapi import status
 from sqlalchemy import select
@@ -7,7 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.enums import OperationStatus
 from app.models.event import Event
 from app.models.operation import Operation
+from app.services.provider_client import ProviderClient, ProviderError
+from app.schemas.event import EventResponse
 from app.schemas.operation import CreateOperationRequest, OperationResponse
+
+
+logger = logging.getLogger(__name__)
 
 
 class OperationConflictError(Exception):
@@ -16,6 +22,85 @@ class OperationConflictError(Exception):
 
 class OperationNotFoundError(Exception):
     pass
+
+
+async def send_to_provider(session: AsyncSession, operation_id: str) -> None:
+    result = await session.execute(
+        select(Operation)
+        .where(Operation.operation_id == operation_id)
+        .with_for_update()
+    )
+    operation = result.scalar_one_or_none()
+    if operation is None:
+        return
+
+    if operation.status in (OperationStatus.COMPLETED, OperationStatus.REJECTED):
+        return
+    if operation.status != OperationStatus.PROCESSING:
+        return
+
+    client = ProviderClient()
+    amount_str = f"{operation.amount:.2f}"
+
+    try:
+        provider_payment_id = await client.create_payment(
+            operation_id=operation.operation_id,
+            amount=amount_str,
+            currency=operation.currency,
+        )
+    except ProviderError as e:
+        logger.warning(
+            "provider call failed operation_id=%s retryable=%s error=%s",
+            operation_id,
+            e.retryable,
+            e,
+        )
+        return
+
+    await session.refresh(operation)
+    if operation.status in (OperationStatus.COMPLETED, OperationStatus.REJECTED):
+        return
+
+    if operation.provider_payment_id is None:
+        operation.provider_payment_id = provider_payment_id
+    elif operation.provider_payment_id != provider_payment_id:
+        logger.warning(
+            "providerPaymentId mismatch operation_id=%s existing=%s got=%s",
+            operation_id,
+            operation.provider_payment_id,
+            provider_payment_id,
+        )
+        return
+
+    await session.commit()
+
+
+async def get_operation_events(
+    session: AsyncSession,
+    operation_id: str,
+) -> list[EventResponse]:
+    operation = await get_operation(session, operation_id)
+    if operation is None:
+        raise OperationNotFoundError(f"Operation {operation_id} not found")
+
+    result = await session.execute(
+        select(Event)
+        .where(Event.operation_id == operation_id)
+        .order_by(Event.event_id.asc())
+    )
+    events = result.scalars().all()
+
+    return [
+        EventResponse(
+            eventId=e.event_id,
+            type=e.type,
+            fromStatus=e.from_status,
+            toStatus=e.to_status,
+            message=e.message,
+            occurredAt=e.occurred_at,
+        )
+        for e in events
+    ]
 
 
 async def submit_operation(
