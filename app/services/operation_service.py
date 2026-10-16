@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 
 async def recover_pending_operations() -> None:
+    """
+    При старте приложения находит все операции в статусе PROCESSING
+    и пытается повторно отправить их провайдеру.
+
+    Нужен после рестарта: намерение уже сохранено в БД, а HTTP-вызов
+    мог не завершиться. Ошибка по одной операции не останавливает остальные.
+    """
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(Operation).where(Operation.status == OperationStatus.PROCESSING)
@@ -46,6 +53,20 @@ class OperationNotFoundError(Exception):
 
 
 async def send_to_provider(session: AsyncSession, operation_id: str) -> None:
+    """
+    Отправляет платёж внешнему провайдеру и при успехе сохраняет providerPaymentId.
+
+    Вызывается после первого submit и из recovery. Не меняет статус на
+    COMPLETED/REJECTED — финальный статус ставит только callback.
+
+    Пропуски:
+    - операция не найдена;
+    - уже финальный статус;
+    - статус не PROCESSING;
+    - providerPaymentId уже заполнен.
+
+    При сетевой ошибке/503 операция остаётся PROCESSING.
+    """
     result = await session.execute(
         select(Operation)
         .where(Operation.operation_id == operation_id)
@@ -102,6 +123,11 @@ async def get_operation_events(
     session: AsyncSession,
     operation_id: str,
 ) -> list[EventResponse]:
+    """
+    Возвращает историю событий операции по возрастанию event_id.
+
+    Если операции нет — OperationNotFoundError.
+    """
     operation = await get_operation(session, operation_id)
     if operation is None:
         raise OperationNotFoundError(f"Operation {operation_id} not found")
@@ -131,9 +157,16 @@ async def submit_operation(
     operation_id: str,
 ) -> tuple[OperationResponse, int]:
     """
-    Возвращает (response, http_status_code).
-    202 — намерение только что создано
-    200 — повторный submit / уже не CREATED
+    Фиксирует намерение отправки платежа.
+
+    Атомарно (с блокировкой строки FOR UPDATE):
+    - если CREATED → переводит в PROCESSING, пишет событие, commit;
+      возвращает (операция, 202);
+    - если уже PROCESSING/COMPLETED/REJECTED → ничего не меняет;
+      возвращает (текущее состояние, 200).
+
+    Вызов провайдера здесь не выполняется — только сохранение намерения в БД.
+    Если операции нет — OperationNotFoundError.
     """
     result = await session.execute(
         select(Operation)
@@ -177,6 +210,9 @@ async def submit_operation(
 
 
 def to_operation_response(operation: Operation) -> OperationResponse:
+    """
+    Преобразует ORM-модель Operation в схему ответа API (camelCase, amount строкой).
+    """
     return OperationResponse(
         operationId=operation.operation_id,
         amount=f"{operation.amount:.2f}",
@@ -191,6 +227,12 @@ async def create_operation(
     session: AsyncSession,
     data: CreateOperationRequest,
 ) -> OperationResponse:
+    """
+    Создаёт новую операцию в статусе CREATED и первое событие истории.
+
+    Повторный operationId → OperationConflictError.
+    Операция и событие сохраняются в одной транзакции.
+    """
     existing = await session.scalar(
         select(Operation).where(Operation.operation_id == data.operationId)
     )

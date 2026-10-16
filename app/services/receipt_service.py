@@ -17,9 +17,9 @@ class ReceiptProviderPaymentIdConflictError(Exception):
 
 async def process_receipt(session: AsyncSession, data: ReceiptRequest) -> None:
     result = await session.execute(
-        select(Operation)
-        .where(Operation.operation_id == data.operationId)
-        .with_for_update()
+        select(Operation).where(
+            Operation.operation_id == data.operationId
+            ).with_for_update()  # Блокировка строки базы данных на время выполнения транзакции, для исключения возникновения race condition.
     )
     operation = result.scalar_one_or_none()
 
@@ -28,6 +28,7 @@ async def process_receipt(session: AsyncSession, data: ReceiptRequest) -> None:
             f"Operation {data.operationId} not found"
         )
 
+    # Зашита от привязки результата платежа к сторонней транзакции
     if (
         operation.provider_payment_id is not None
         and operation.provider_payment_id != data.providerPaymentId
@@ -40,8 +41,10 @@ async def process_receipt(session: AsyncSession, data: ReceiptRequest) -> None:
         operation.provider_payment_id = data.providerPaymentId
 
     target_status = OperationStatus(data.result)
-
-    if operation.status in (OperationStatus.COMPLETED, OperationStatus.REJECTED):
+    # Обеспечение идемпотентности обработки операции
+    if operation.status in (
+        OperationStatus.COMPLETED, OperationStatus.REJECTED
+            ):
         await session.commit()
         return
 
