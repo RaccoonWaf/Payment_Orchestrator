@@ -1,12 +1,12 @@
 import asyncio
-import logging
 import random
 
 import httpx
 
 from app.config import settings
+from app.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class ProviderError(Exception):
@@ -62,20 +62,21 @@ class ProviderClient:
             except httpx.RequestError as e:
                 last_error = ProviderError(str(e), retryable=True)
                 logger.warning(
-                    "provider network error operation_id=%s attempt=%s/%s error=%s",
-                    operation_id,
-                    attempt,
-                    self.max_attempts,
-                    e,
+                    "provider_network_error",
+                    operationId=operation_id,
+                    attempt=attempt,
+                    max_attempts=self.max_attempts,
+                    error=str(e),
                 )
             else:
                 if response.status_code == 503:
                     last_error = ProviderError("provider unavailable", retryable=True)
                     logger.warning(
-                        "provider 503 operation_id=%s attempt=%s/%s",
-                        operation_id,
-                        attempt,
-                        self.max_attempts,
+                        "provider_unavailable",
+                        operationId=operation_id,
+                        attempt=attempt,
+                        max_attempts=self.max_attempts,
+                        status_code=503,
                     )
                 elif response.status_code not in (200, 202):
                     raise ProviderError(
@@ -90,10 +91,10 @@ class ProviderClient:
                             "providerPaymentId missing in response"
                             )
                     logger.info(
-                        "provider accepted operation_id=%s attempt=%s providerPaymentId=%s",
-                        operation_id,
-                        attempt,
-                        provider_payment_id,
+                        "provider_accepted",
+                        operationId=operation_id,
+                        attempt=attempt,
+                        providerPaymentId=provider_payment_id,
                     )
                     return provider_payment_id
 
@@ -104,6 +105,12 @@ class ProviderClient:
             delay = delay * (0.5 + random.random())
             await asyncio.sleep(delay)
 
+        logger.error(
+                    "provider_call_exhausted",
+                    operationId=operation_id,
+                    attempts=self.max_attempts,
+                    error=str(last_error) if last_error else None,
+                )
         raise last_error or ProviderError(
             "provider call failed",
             retryable=True

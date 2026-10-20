@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-import logging
 
 from fastapi import status
 from sqlalchemy import select
@@ -12,9 +11,10 @@ from app.models.operation import Operation
 from app.services.provider_client import ProviderClient, ProviderError
 from app.schemas.event import EventResponse
 from app.schemas.operation import CreateOperationRequest, OperationResponse
+from app.logging_config import get_logger
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def recover_pending_operations() -> None:
@@ -27,29 +27,32 @@ async def recover_pending_operations() -> None:
     """
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(Operation).where(Operation.status == OperationStatus.PROCESSING)
+            select(Operation).where(
+                Operation.status == OperationStatus.PROCESSING
+            )
         )
         operations = result.scalars().all()
 
-    logger.info("recovery: found %s PROCESSING operations", len(operations))
+    logger.info("recovery_started", pending_count=len(operations))
 
     for operation in operations:
+        logger.info("recovery_operation", operationId=operation.operation_id)
         try:
             async with AsyncSessionLocal() as session:
                 await send_to_provider(session, operation.operation_id)
         except Exception:
             logger.exception(
-                "recovery failed operation_id=%s",
-                operation.operation_id,
+                "recovery_operation_failed",
+                operationId=operation.operation_id,
             )
 
 
 class OperationConflictError(Exception):
-    pass
+    """Операция с таким operationId уже существует."""
 
 
 class OperationNotFoundError(Exception):
-    pass
+    """Операция с указанным id не найдена."""
 
 
 async def send_to_provider(session: AsyncSession, operation_id: str) -> None:
@@ -94,10 +97,10 @@ async def send_to_provider(session: AsyncSession, operation_id: str) -> None:
         )
     except ProviderError as e:
         logger.warning(
-            "provider call failed operation_id=%s retryable=%s error=%s",
-            operation_id,
-            e.retryable,
-            e,
+            "provider_call_failed",
+            operationId=operation_id,
+            retryable=e.retryable,
+            error=str(e),
         )
         return
 
@@ -107,12 +110,17 @@ async def send_to_provider(session: AsyncSession, operation_id: str) -> None:
 
     if operation.provider_payment_id is None:
         operation.provider_payment_id = provider_payment_id
+        logger.info(
+            "provider_payment_id_saved",
+            operationId=operation_id,
+            providerPaymentId=provider_payment_id,
+        )
     elif operation.provider_payment_id != provider_payment_id:
         logger.warning(
-            "providerPaymentId mismatch operation_id=%s existing=%s got=%s",
-            operation_id,
-            operation.provider_payment_id,
-            provider_payment_id,
+            "provider_payment_id_mismatch",
+            operationId=operation_id,
+            existing=operation.provider_payment_id,
+            got=provider_payment_id,
         )
         return
 
@@ -179,6 +187,15 @@ async def submit_operation(
         raise OperationNotFoundError(f"Operation {operation_id} not found")
 
     if operation.status != OperationStatus.CREATED:
+        logger.info(
+            "submit_idempotent",
+            operationId=operation_id,
+            status=str(
+                operation.status.value
+                if hasattr(operation.status, "value")
+                else operation.status
+            ),
+        )
         return to_operation_response(operation), status.HTTP_200_OK
 
     operation.status = OperationStatus.PROCESSING
@@ -206,6 +223,12 @@ async def submit_operation(
     await session.commit()
     await session.refresh(operation)
 
+    logger.info(
+        "submit_intent_saved",
+        operationId=operation_id,
+        status="PROCESSING",
+    )
+
     return to_operation_response(operation), status.HTTP_202_ACCEPTED
 
 
@@ -218,7 +241,11 @@ def to_operation_response(operation: Operation) -> OperationResponse:
         amount=f"{operation.amount:.2f}",
         currency=operation.currency,
         description=operation.description,
-        status=operation.status.value if hasattr(operation.status, "value") else str(operation.status),
+        status=(
+            operation.status.value
+            if hasattr(operation.status, "value")
+            else str(operation.status)
+        ),
         providerPaymentId=operation.provider_payment_id,
     )
 
@@ -239,7 +266,7 @@ async def create_operation(
     if existing is not None:
         raise OperationConflictError(
             f"Operation {data.operationId} already exists"
-            )
+        )
 
     operation = Operation(
         operation_id=data.operationId,
@@ -264,6 +291,8 @@ async def create_operation(
     await session.commit()
     await session.refresh(operation)
 
+    logger.info("operation_created", operationId=data.operationId)
+
     return to_operation_response(operation)
 
 
@@ -271,6 +300,9 @@ async def get_operation(
     session: AsyncSession,
     operation_id: str,
 ) -> Operation | None:
+    """
+    Возвращает операцию по id или None, если не найдена.
+    """
     return await session.scalar(
         select(Operation).where(Operation.operation_id == operation_id)
     )

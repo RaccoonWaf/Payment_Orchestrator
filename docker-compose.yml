@@ -11,10 +11,12 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - .:/app
-      - candidate-data:/data
+    - .:/app
+    - candidate-data:/data
+    - ./logs:/app/logs
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
   provider-simulator:
     image: ghcr.io/fintech-dev-lab/internship-provider-simulator:v0.2.0
@@ -33,6 +35,11 @@ services:
       - pgdata:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
 
 volumes:
   candidate-data:

@@ -207,6 +207,7 @@ docker compose run --rm \
 | `POSTGRES_PASSWORD` | Пароль БД       | `payments`                       |
 | `POSTGRES_DB`       | Имя БД          | `payments`                       |
 
+
 ## Структура проекта
 
 ```text
@@ -219,9 +220,27 @@ app/
   config.py
   db.py
   main.py
+logs/
+tests/
 alembic/        # миграции
 docker-compose.yml
 Dockerfile
 requirements.txt
 README.md
 ```
+
+## Логи
+
+Сервис пишет структурные логи в JSON.
+
+- консоль: `docker compose logs candidate-service`
+- файлы: каталог `logs/` (ротация раз в сутки, хранение 30 дней)
+
+Пример поиска по операции:
+
+```bash
+# Linux / Git Bash
+grep log-demo-1 logs/app.log
+
+# или
+docker compose logs candidate-service | grep log-demo-1
